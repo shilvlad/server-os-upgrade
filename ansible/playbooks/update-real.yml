@@ -1,0 +1,73 @@
+# ansible/playbooks/update-real.yml
+---
+- name: Real OS Update Execution
+  hosts: all
+  serial: 10%
+  max_fail_percentage: 20
+
+  tasks:
+    - name: Create pre-update snapshot
+      command: |
+        echo "Pre-update snapshot taken at {{ ansible_date_time.iso8601 }}"
+      when: create_snapshots | default(false)
+
+    - name: Update package cache
+      package:
+        update_cache: yes
+      register: cache_update
+
+    - name: Perform full system upgrade (Debian/Ubuntu)
+      apt:
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+        update_cache: no
+      when: ansible_os_family == "Debian"
+      register: apt_upgrade
+
+    - name: Perform full system upgrade (RedHat/CentOS/Rocky)
+      yum:
+        name: '*'
+        state: latest
+        update_cache: no
+      when: ansible_os_family == "RedHat"
+      register: yum_upgrade
+
+    - name: Check if reboot required
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_required_file
+      when: ansible_os_family == "Debian"
+
+    - name: Execute reboot if needed
+      reboot:
+        reboot_timeout: 900
+        pre_reboot_delay: 30
+        post_reboot_delay: 90
+        msg: "Rebooting after OS update triggered by GitHub Actions"
+      when:
+        - reboot_required_file.stat.exists | default(false) or
+          (ansible_os_family == "RedHat" and ansible_kernel != ansible_kernel)
+      register: reboot_result
+
+    - name: Wait for system to become responsive
+      wait_for_connection:
+        delay: 10
+        timeout: 300
+      when: reboot_result.changed
+
+    - name: Save update summary
+      copy:
+        content: |
+          ====================================
+          OS Update Completed: {{ ansible_date_time.iso8601 }}
+          ====================================
+          Host: {{ inventory_hostname }}
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          Kernel: {{ ansible_kernel }}
+          Uptime: {{ ansible_uptime_seconds }} seconds
+          Packages Updated: {{ apt_upgrade.results | default(yum_upgrade.results) | length }}
+          Reboot Performed: {{ reboot_result.changed | default(false) }}
+          ====================================
+        dest: /var/log/last-os-update.log
+        mode: '0644'

@@ -1,0 +1,217 @@
+# ansible/playbooks/health-check.yml
+---
+- name: Post-Update Health Verification
+  hosts: all
+  gather_facts: yes
+  serial: 20%
+
+  vars:
+    health_api_url: "{{ ansible_default_ipv4.address }}:8080/health"
+    critical_services:
+      - sshd
+      - cron
+      - rsyslog
+      - docker
+    max_cpu_load: 5.0
+    max_memory_percent: 90
+    min_disk_percent: 15
+
+  tasks:
+    - name: Determine check type
+      set_fact:
+        checks_to_run: >-
+          {% if check_type == 'system' %}
+          [1,2,3,4]
+          {% elif check_type == 'services' %}
+          [5,6]
+          {% elif check_type == 'application' %}
+          [7,8,9]
+          {% elif check_type == 'network' %}
+          [10,11,12]
+          {% elif check_type == 'security' %}
+          [13,14,15]
+          {% else %}
+          [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+          {% endif %}
+
+    # ============================================
+    # SYSTEM CHECKS
+    # ============================================
+
+    - name: CHECK 1 - Host is reachable
+      ping:
+      register: ping_check
+      when: 1 in checks_to_run
+
+    - name: CHECK 2 - No pending reboot
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_check
+      when: 2 in checks_to_run and ansible_os_family == "Debian"
+
+    - name: CHECK 3 - Kernel panic check
+      shell: |
+        dmesg | grep -i "panic\|oops" | tail -5
+      register: kernel_panic
+      when: 3 in checks_to_run
+      failed_when: false
+
+    - name: CHECK 4 - System load average
+      shell: |
+        uptime | awk -F 'load average:' '{print $2}' | cut -d, -f1 | xargs
+      register: load_avg
+      when: 4 in checks_to_run
+      failed_when: load_avg.stdout | float > max_cpu_load
+
+    # ============================================
+    # SERVICES CHECKS
+    # ============================================
+
+    - name: CHECK 5 - Critical services status
+      systemd:
+        name: "{{ item }}"
+        state: started
+      loop: "{{ critical_services }}"
+      register: services_check
+      when: 5 in checks_to_run
+      ignore_errors: yes
+
+    - name: CHECK 6 - Failed units check
+      shell: |
+        systemctl list-units --state=failed --no-legend | wc -l
+      register: failed_units
+      when: 6 in checks_to_run
+      failed_when: failed_units.stdout | int > 0
+
+    # ============================================
+    # APPLICATION CHECKS
+    # ============================================
+
+    - name: CHECK 7 - Application health endpoint
+      uri:
+        url: "http://{{ health_api_url }}"
+        status_code: 200
+        timeout: 10
+      register: app_health
+      when: 7 in checks_to_run
+      ignore_errors: yes
+      failed_when: app_health.status != 200
+
+    - name: CHECK 8 - Application logs (no errors since update)
+      shell: |
+        journalctl --since "1 hour ago" --priority=err | grep -v "deprecated" | wc -l
+      register: app_errors
+      when: 8 in checks_to_run
+      failed_when: app_errors.stdout | int > 10
+
+    - name: CHECK 9 - Database connectivity (if applicable)
+      shell: |
+        timeout 5 nc -zv {{ db_host | default('localhost') }} {{ db_port | default(3306) }} 2>&1
+      register: db_check
+      when: 9 in checks_to_run and db_host is defined
+      ignore_errors: yes
+      failed_when: db_check.rc != 0
+
+    # ============================================
+    # NETWORK CHECKS
+    # ============================================
+
+    - name: CHECK 10 - DNS resolution
+      command: nslookup google.com
+      register: dns_check
+      when: 10 in checks_to_run
+      failed_when: dns_check.rc != 0
+
+    - name: CHECK 11 - Outbound connectivity
+      uri:
+        url: https://api.github.com
+        status_code: 200
+        timeout: 5
+      register: outbound_check
+      when: 11 in checks_to_run
+      failed_when: outbound_check.status != 200
+
+    - name: CHECK 12 - Network interfaces
+      shell: |
+        ip link show | grep -c "state UP"
+      register: interfaces_up
+      when: 12 in checks_to_run
+      failed_when: interfaces_up.stdout | int < 1
+
+    # ============================================
+    # SECURITY CHECKS
+    # ============================================
+
+    - name: CHECK 13 - Firewall status
+      command: ufw status
+      register: firewall_check
+      when: 13 in checks_to_run and ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: CHECK 14 - Failed login attempts
+      shell: |
+        journalctl -u ssh --since "1 hour ago" | grep -c "Failed password"
+      register: failed_logins
+      when: 14 in checks_to_run
+      failed_when: failed_logins.stdout | int > 50
+
+    - name: CHECK 15 - Security updates applied
+      shell: |
+        if command -v apt &> /dev/null; then
+          apt list --installed 2>/dev/null | grep -c security
+        else
+          yum updateinfo list security all 2>/dev/null | grep -c "Security Notice"
+        fi
+      register: security_updates
+      when: 15 in checks_to_run
+      changed_when: false
+
+    # ============================================
+    # FINAL ASSESSMENT
+    # ============================================
+
+    - name: Generate comprehensive health report
+      set_fact:
+        health_pass: >-
+          {% set failed_checks = [] %}
+          {% for check in checks_to_run %}
+            {% if check == 1 and ping_check.failed %} 
+              {% set _ = failed_checks.append(1) %}
+            {% elif check == 2 and reboot_check.stat.exists | default(false) %}
+              {% set _ = failed_checks.append(2) %}
+            {% elif check == 4 and load_avg.failed %}
+              {% set _ = failed_checks.append(4) %}
+            {% elif check == 6 and failed_units.stdout | int > 0 %}
+              {% set _ = failed_checks.append(6) %}
+            {% elif check == 7 and app_health.status != 200 %}
+              {% set _ = failed_checks.append(7) %}
+            {% elif check == 10 and dns_check.rc != 0 %}
+              {% set _ = failed_checks.append(10) %}
+            {% endif %}
+          {% endfor %}
+          {{ failed_checks | length == 0 }}
+
+    - name: Save detailed health report
+      copy:
+        content: |
+          {
+            "host": "{{ inventory_hostname }}",
+            "timestamp": "{{ ansible_date_time.iso8601 }}",
+            "status": "{{ 'PASSED' if health_pass else 'FAILED' }}",
+            "checks_passed": {{ checks_to_run | length - (failed_checks | default([]) | length) }},
+            "checks_total": {{ checks_to_run | length }},
+            "details": {
+              "load_average": "{{ load_avg.stdout | default('N/A') }}",
+              "kernel": "{{ ansible_kernel }}",
+              "uptime": "{{ ansible_uptime_seconds }}",
+              "failed_services": {{ services_check.results | selectattr('failed') | map(attribute='item') | list | to_json }}
+            }
+          }
+        dest: "/tmp/health-check-{{ inventory_hostname }}-{{ timestamp }}.json"
+      delegate_to: localhost
+      when: timestamp is defined
+
+    - name: Fail workflow if health checks failed
+      fail:
+        msg: "Health checks failed for {{ inventory_hostname }}"
+      when: not health_pass
