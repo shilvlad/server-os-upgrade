@@ -1,0 +1,342 @@
+name: OS Automated Update Pipeline
+
+on:
+  schedule:
+    # Еженедельно в воскресенье в 02:00
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      skip_dry_run:
+        description: 'Skip dry-run and proceed directly'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      target_inventory:
+        description: 'Target inventory file'
+        required: false
+        default: 'prod.yml'
+        type: string
+
+env:
+  ANSIBLE_HOST_KEY_CHECKING: "False"
+  ANSIBLE_STDOUT_CALLBACK: "yaml"
+  TIMESTAMP: ${{ github.run_number }}-${{ github.run_attempt }}
+
+jobs:
+  # ============================================
+  # JOB 1: DRY-RUN (предварительный просмотр)
+  # ============================================
+  dry-run:
+    name: 🔍 Dry-Run - Preview Updates
+    runs-on: ubuntu-latest
+    if: github.event.inputs.skip_dry_run != 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python and Ansible
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Ansible and dependencies
+        run: |
+          pip install ansible jmespath
+          ansible --version
+
+      - name: Setup SSH keys
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.SSH_HOSTS }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Run Dry-Run Playbook
+        run: |
+          ansible-playbook ansible/playbooks/update-dry-run.yml \
+            -i ansible/inventory/${{ github.event.inputs.target_inventory || 'prod.yml' }} \
+            --check \
+            --diff \
+            --extra-vars "timestamp=${{ env.TIMESTAMP }}" \
+            | tee dry-run-output.txt
+
+      - name: Generate Dry-Run Report
+        run: |
+          echo "## 📊 Dry-Run Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Server | Updates Found |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|---------------|" >> $GITHUB_STEP_SUMMARY
+          grep -E "SERVER:|UPDATES FOUND:" dry-run-output.txt | \
+            paste - - | \
+            awk '{print "| " $2 " | " $6 " |"}' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Dry-Run Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-report-${{ env.TIMESTAMP }}
+          path: |
+            dry-run-output.txt
+            /tmp/dry-run-*.json
+          retention-days: 7
+
+  # ============================================
+  # JOB 2: APPROVAL (ручное подтверждение)
+  # ============================================
+  approval:
+    name: ⏸️ Awaiting Manual Approval
+    runs-on: ubuntu-latest
+    needs: [dry-run]
+    if: always() && !cancelled()
+    environment:
+      name: production-update
+      url: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Wait for approval
+        run: |
+          echo "⏳ Waiting for manual approval to proceed with real update..."
+          echo "📋 Please review dry-run results above before approving"
+          echo "🔄 To approve: Go to Actions → OS Update Pipeline → Review deployments"
+
+  # ============================================
+  # JOB 3: REAL UPDATE (фактическое обновление)
+  # ============================================
+  real-update:
+    name: 🚀 Real Update Execution
+    runs-on: ubuntu-latest
+    needs: [approval]
+    if: success()
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python and Ansible
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Ansible and dependencies
+        run: |
+          pip install ansible jmespath
+
+      - name: Setup SSH keys
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Setup SSH known hosts
+        run: |
+          for host in ${{ secrets.SSH_HOSTS }}; do
+            ssh-keyscan -H $host >> ~/.ssh/known_hosts 2>/dev/null
+          done
+
+      - name: Run Real Update Playbook
+        id: update
+        run: |
+          ansible-playbook ansible/playbooks/update-real.yml \
+            -i ansible/inventory/${{ github.event.inputs.target_inventory || 'prod.yml' }} \
+            --extra-vars "timestamp=${{ env.TIMESTAMP }}" \
+            2>&1 | tee update-output.log
+          
+          # Check if update was successful
+          if [ ${PIPESTATUS[0]} -eq 0 ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Upload Update Logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-logs-${{ env.TIMESTAMP }}
+          path: |
+            update-output.log
+            /tmp/update-results-*.json
+          retention-days: 14
+
+      - name: Notify Slack on Update Start
+        if: secrets.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v1.25
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          text: |
+            🚀 OS Update started for inventory: ${{ github.event.inputs.target_inventory || 'prod.yml' }}
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  # ============================================
+  # JOB 4: HEALTH CHECK (многоуровневая проверка)
+  # ============================================
+  health-check:
+    name: 🏥 Post-Update Health Check
+    runs-on: ubuntu-latest
+    needs: [real-update]
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        check_type: [system, services, application, network, security]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python and Ansible
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install tools
+        run: |
+          pip install ansible jmespath
+          sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Setup SSH keys
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Run ${{ matrix.check_type }} Health Checks
+        id: health_${{ matrix.check_type }}
+        continue-on-error: true
+        run: |
+          ansible-playbook ansible/playbooks/health-check.yml \
+            -i ansible/inventory/${{ github.event.inputs.target_inventory || 'prod.yml' }} \
+            --extra-vars "check_type=${{ matrix.check_type }} timestamp=${{ env.TIMESTAMP }}" \
+            | tee health-${{ matrix.check_type }}.log
+          
+          if [ ${PIPESTATUS[0]} -eq 0 ]; then
+            echo "status=passed" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Health Check Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: health-check-${{ matrix.check_type }}-${{ env.TIMESTAMP }}
+          path: |
+            health-${{ matrix.check_type }}.log
+            /tmp/health-check-*.json
+          retention-days: 30
+
+    outputs:
+      system_status: ${{ steps.health_system.outputs.status }}
+      services_status: ${{ steps.health_services.outputs.status }}
+      application_status: ${{ steps.health_application.outputs.status }}
+      network_status: ${{ steps.health_network.outputs.status }}
+      security_status: ${{ steps.health_security.outputs.status }}
+
+  # ============================================
+  # JOB 5: FINAL VERDICT
+  # ============================================
+  final-verdict:
+    name: ✅ Final Update Assessment
+    runs-on: ubuntu-latest
+    needs: [health-check]
+    if: always()
+
+    steps:
+      - name: Aggregate Health Check Results
+        run: |
+          echo "## 📋 OS Update Completion Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check Type | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|--------|" >> $GITHUB_STEP_SUMMARY
+          
+          FAILED=0
+          
+          for check in system services application network security; do
+            STATUS=$(echo '${{ toJSON(needs.health-check.outputs) }}' | jq -r ".${check}_status // 'failed'")
+            if [ "$STATUS" == "passed" ]; then
+              echo "| $check | ✅ PASSED |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| $check | ❌ FAILED |" >> $GITHUB_STEP_SUMMARY
+              FAILED=$((FAILED+1))
+            fi
+          done
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ $FAILED -eq 0 ]; then
+            echo "## 🎉 UPDATE SUCCESSFUL" >> $GITHUB_STEP_SUMMARY
+            echo "All health checks passed. Systems are operational." >> $GITHUB_STEP_SUMMARY
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "## ⚠️ UPDATE HAS ISSUES" >> $GITHUB_STEP_SUMMARY
+            echo "$FAILED health check(s) failed. Manual intervention required." >> $GITHUB_STEP_SUMMARY
+            echo "status=failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Notify on Failure
+        if: steps.verdict.outputs.status == 'failed'
+        uses: slackapi/slack-github-action@v1.25
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          text: |
+            ❌ OS UPDATE FAILED HEALTH CHECKS!
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Immediate investigation required.
+
+      - name: Create GitHub Issue on Failure
+        if: steps.verdict.outputs.status == 'failed'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🚨 OS Update Failed - Run #${context.runId}`,
+              body: `OS update health checks failed. See details: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['bug', 'production']
+            })
+
+  # ============================================
+  # JOB 6: ROLLBACK (опционально, при проблемах)
+  # ============================================
+  rollback:
+    name: 🔄 Emergency Rollback
+    runs-on: ubuntu-latest
+    needs: [final-verdict]
+    if: needs.final-verdict.outputs.status == 'failed'
+    environment:
+      name: production-update
+      url: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Ansible
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Ansible
+        run: pip install ansible
+
+      - name: Setup SSH keys
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Execute Rollback
+        run: |
+          ansible-playbook ansible/playbooks/rollback.yml \
+            -i ansible/inventory/${{ github.event.inputs.target_inventory || 'prod.yml' }} \
+            --extra-vars "timestamp=${{ env.TIMESTAMP }}"
+
+      - name: Notify Rollback
+        uses: slackapi/slack-github-action@v1.25
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          text: |
+            🔄 ROLLBACK EXECUTED for failed update
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
