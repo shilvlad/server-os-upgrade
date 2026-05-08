@@ -182,7 +182,7 @@
             {% elif check == 4 and load_avg.failed %}
               {% set _ = failed_checks.append(4) %}
             {% elif check == 6 and failed_units.stdout | int > 0 %}
-              {% set _ = failed_checks.append(6) %}
+              {% set_ = failed_checks.append(6) %}
             {% elif check == 7 and app_health.status != 200 %}
               {% set _ = failed_checks.append(7) %}
             {% elif check == 10 and dns_check.rc != 0 %}
