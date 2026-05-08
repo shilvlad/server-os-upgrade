@@ -1,3 +1,4 @@
+# .github/workflows/os-update.yml
 name: OS Automated Update Pipeline
 
 on:
@@ -25,10 +26,10 @@ env:
   ANSIBLE_STDOUT_CALLBACK: "yaml"
   TIMESTAMP: ${{ github.run_number }}-${{ github.run_attempt }}
 
+# ============================================
+# JOB 1: DRY-RUN (предварительный просмотр)
+# ============================================
 jobs:
-  # ============================================
-  # JOB 1: DRY-RUN (предварительный просмотр)
-  # ============================================
   dry-run:
     name: 🔍 Dry-Run - Preview Updates
     runs-on: ubuntu-latest
@@ -72,7 +73,7 @@ jobs:
           echo "|--------|---------------|" >> $GITHUB_STEP_SUMMARY
           grep -E "SERVER:|UPDATES FOUND:" dry-run-output.txt | \
             paste - - | \
-            awk '{print "| " $2 " | " $6 " |"}' >> $GITHUB_STEP_SUMMARY
+            awk '{print "| " $2 " | " $6 " |"}' >> $GITHUB_STEP_SUMMARY || echo "No updates found" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Dry-Run Artifacts
         uses: actions/upload-artifact@v4
@@ -90,7 +91,7 @@ jobs:
     name: ⏸️ Awaiting Manual Approval
     runs-on: ubuntu-latest
     needs: [dry-run]
-    if: always() && !cancelled()
+    if: always() && !cancelled() && github.event.inputs.skip_dry_run != 'true'
     environment:
       name: production-update
       url: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -171,17 +172,13 @@ jobs:
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
   # ============================================
-  # JOB 4: HEALTH CHECK (многоуровневая проверка)
+  # JOB 4: HEALTH CHECK SYSTEM
   # ============================================
-  health-check:
-    name: 🏥 Post-Update Health Check
+  health-check-system:
+    name: 🏥 System Health Check
     runs-on: ubuntu-latest
     needs: [real-update]
     if: always()
-    strategy:
-      fail-fast: false
-      matrix:
-        check_type: [system, services, application, network, security]
 
     steps:
       - name: Checkout repository
@@ -203,14 +200,14 @@ jobs:
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
 
-      - name: Run ${{ matrix.check_type }} Health Checks
-        id: health_${{ matrix.check_type }}
+      - name: Run System Health Checks
+        id: system_check
         continue-on-error: true
         run: |
           ansible-playbook ansible/playbooks/health-check.yml \
             -i ansible/inventory/${{ github.event.inputs.target_inventory || 'prod.yml' }} \
-            --extra-vars "check_type=${{ matrix.check_type }} timestamp=${{ env.TIMESTAMP }}" \
-            | tee health-${{ matrix.check_type }}.log
+            --extra-vars "check_type=system timestamp=${{ env.TIMESTAMP }}" \
+            | tee health-system.log
           
           if [ ${PIPESTATUS[0]} -eq 0 ]; then
             echo "status=passed" >> $GITHUB_OUTPUT
@@ -221,30 +218,247 @@ jobs:
       - name: Upload Health Check Results
         uses: actions/upload-artifact@v4
         with:
-          name: health-check-${{ matrix.check_type }}-${{ env.TIMESTAMP }}
+          name: health-check-system-${{ env.TIMESTAMP }}
           path: |
-            health-${{ matrix.check_type }}.log
+            health-system.log
             /tmp/health-check-*.json
           retention-days: 30
 
     outputs:
-      system_status: ${{ steps.health_system.outputs.status }}
-      services_status: ${{ steps.health_services.outputs.status }}
-      application_status: ${{ steps.health_application.outputs.status }}
-      network_status: ${{ steps.health_network.outputs.status }}
-      security_status: ${{ steps.health_security.outputs.status }}
+      status: ${{ steps.system_check.outputs.status }}
 
   # ============================================
-  # JOB 5: FINAL VERDICT
+  # JOB 5: HEALTH CHECK SERVICES
+  # ============================================
+  health-check-services:
+    name: 🔧 Services Health Check
+    runs-on: ubuntu-latest
+    needs: [real-update]
+    if: always()
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python and Ansible
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install tools
+        run: |
+          pip install ansible jmespath
+
+      - name: Setup SSH keys
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Run Services Health Checks
+        id: services_check
+        continue-on-error: true
+        run: |
+          ansible-playbook ansible/playbooks/health-check.yml \
+            -i ansible/inventory/${{ github.event.inputs.target_inventory || 'prod.yml' }} \
+            --extra-vars "check_type=services timestamp=${{ env.TIMESTAMP }}" \
+            | tee health-services.log
+          
+          if [ ${PIPESTATUS[0]} -eq 0 ]; then
+            echo "status=passed" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Health Check Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: health-check-services-${{ env.TIMESTAMP }}
+          path: |
+            health-services.log
+            /tmp/health-check-*.json
+          retention-days: 30
+
+    outputs:
+      status: ${{ steps.services_check.outputs.status }}
+
+  # ============================================
+  # JOB 6: HEALTH CHECK APPLICATION
+  # ============================================
+  health-check-application:
+    name: 🎯 Application Health Check
+    runs-on: ubuntu-latest
+    needs: [real-update]
+    if: always()
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python and Ansible
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install tools
+        run: |
+          pip install ansible jmespath
+
+      - name: Setup SSH keys
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Run Application Health Checks
+        id: app_check
+        continue-on-error: true
+        run: |
+          ansible-playbook ansible/playbooks/health-check.yml \
+            -i ansible/inventory/${{ github.event.inputs.target_inventory || 'prod.yml' }} \
+            --extra-vars "check_type=application timestamp=${{ env.TIMESTAMP }}" \
+            | tee health-application.log
+          
+          if [ ${PIPESTATUS[0]} -eq 0 ]; then
+            echo "status=passed" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Health Check Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: health-check-application-${{ env.TIMESTAMP }}
+          path: |
+            health-application.log
+            /tmp/health-check-*.json
+          retention-days: 30
+
+    outputs:
+      status: ${{ steps.app_check.outputs.status }}
+
+  # ============================================
+  # JOB 7: HEALTH CHECK NETWORK
+  # ============================================
+  health-check-network:
+    name: 🌐 Network Health Check
+    runs-on: ubuntu-latest
+    needs: [real-update]
+    if: always()
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python and Ansible
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install tools
+        run: |
+          pip install ansible jmespath
+
+      - name: Setup SSH keys
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Run Network Health Checks
+        id: network_check
+        continue-on-error: true
+        run: |
+          ansible-playbook ansible/playbooks/health-check.yml \
+            -i ansible/inventory/${{ github.event.inputs.target_inventory || 'prod.yml' }} \
+            --extra-vars "check_type=network timestamp=${{ env.TIMESTAMP }}" \
+            | tee health-network.log
+          
+          if [ ${PIPESTATUS[0]} -eq 0 ]; then
+            echo "status=passed" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Health Check Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: health-check-network-${{ env.TIMESTAMP }}
+          path: |
+            health-network.log
+            /tmp/health-check-*.json
+          retention-days: 30
+
+    outputs:
+      status: ${{ steps.network_check.outputs.status }}
+
+  # ============================================
+  # JOB 8: HEALTH CHECK SECURITY
+  # ============================================
+  health-check-security:
+    name: 🔒 Security Health Check
+    runs-on: ubuntu-latest
+    needs: [real-update]
+    if: always()
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python and Ansible
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install tools
+        run: |
+          pip install ansible jmespath
+
+      - name: Setup SSH keys
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Run Security Health Checks
+        id: security_check
+        continue-on-error: true
+        run: |
+          ansible-playbook ansible/playbooks/health-check.yml \
+            -i ansible/inventory/${{ github.event.inputs.target_inventory || 'prod.yml' }} \
+            --extra-vars "check_type=security timestamp=${{ env.TIMESTAMP }}" \
+            | tee health-security.log
+          
+          if [ ${PIPESTATUS[0]} -eq 0 ]; then
+            echo "status=passed" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Health Check Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: health-check-security-${{ env.TIMESTAMP }}
+          path: |
+            health-security.log
+            /tmp/health-check-*.json
+          retention-days: 30
+
+    outputs:
+      status: ${{ steps.security_check.outputs.status }}
+
+  # ============================================
+  # JOB 9: FINAL VERDICT
   # ============================================
   final-verdict:
     name: ✅ Final Update Assessment
     runs-on: ubuntu-latest
-    needs: [health-check]
+    needs: [health-check-system, health-check-services, health-check-application, health-check-network, health-check-security]
     if: always()
 
     steps:
       - name: Aggregate Health Check Results
+        id: verdict
         run: |
           echo "## 📋 OS Update Completion Report" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -253,15 +467,50 @@ jobs:
           
           FAILED=0
           
-          for check in system services application network security; do
-            STATUS=$(echo '${{ toJSON(needs.health-check.outputs) }}' | jq -r ".${check}_status // 'failed'")
-            if [ "$STATUS" == "passed" ]; then
-              echo "| $check | ✅ PASSED |" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "| $check | ❌ FAILED |" >> $GITHUB_STEP_SUMMARY
-              FAILED=$((FAILED+1))
-            fi
-          done
+          # System check
+          SYSTEM_STATUS="${{ needs.health-check-system.outputs.status }}"
+          if [ "$SYSTEM_STATUS" == "passed" ] || [ -z "$SYSTEM_STATUS" ]; then
+            echo "| System | ✅ PASSED |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| System | ❌ FAILED |" >> $GITHUB_STEP_SUMMARY
+            FAILED=$((FAILED+1))
+          fi
+          
+          # Services check
+          SERVICES_STATUS="${{ needs.health-check-services.outputs.status }}"
+          if [ "$SERVICES_STATUS" == "passed" ] || [ -z "$SERVICES_STATUS" ]; then
+            echo "| Services | ✅ PASSED |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Services | ❌ FAILED |" >> $GITHUB_STEP_SUMMARY
+            FAILED=$((FAILED+1))
+          fi
+          
+          # Application check
+          APP_STATUS="${{ needs.health-check-application.outputs.status }}"
+          if [ "$APP_STATUS" == "passed" ] || [ -z "$APP_STATUS" ]; then
+            echo "| Application | ✅ PASSED |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Application | ❌ FAILED |" >> $GITHUB_STEP_SUMMARY
+            FAILED=$((FAILED+1))
+          fi
+          
+          # Network check
+          NETWORK_STATUS="${{ needs.health-check-network.outputs.status }}"
+          if [ "$NETWORK_STATUS" == "passed" ] || [ -z "$NETWORK_STATUS" ]; then
+            echo "| Network | ✅ PASSED |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Network | ❌ FAILED |" >> $GITHUB_STEP_SUMMARY
+            FAILED=$((FAILED+1))
+          fi
+          
+          # Security check
+          SECURITY_STATUS="${{ needs.health-check-security.outputs.status }}"
+          if [ "$SECURITY_STATUS" == "passed" ] || [ -z "$SECURITY_STATUS" ]; then
+            echo "| Security | ✅ PASSED |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Security | ❌ FAILED |" >> $GITHUB_STEP_SUMMARY
+            FAILED=$((FAILED+1))
+          fi
           
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ $FAILED -eq 0 ]; then
@@ -274,8 +523,8 @@ jobs:
             echo "status=failed" >> $GITHUB_OUTPUT
           fi
 
-      - name: Notify on Failure
-        if: steps.verdict.outputs.status == 'failed'
+      - name: Notify Slack on Failure
+        if: steps.verdict.outputs.status == 'failed' && secrets.SLACK_WEBHOOK_URL != ''
         uses: slackapi/slack-github-action@v1.25
         with:
           webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -297,8 +546,11 @@ jobs:
               labels: ['bug', 'production']
             })
 
+    outputs:
+      status: ${{ steps.verdict.outputs.status }}
+
   # ============================================
-  # JOB 6: ROLLBACK (опционально, при проблемах)
+  # JOB 10: ROLLBACK (опционально, при проблемах)
   # ============================================
   rollback:
     name: 🔄 Emergency Rollback
@@ -334,6 +586,7 @@ jobs:
             --extra-vars "timestamp=${{ env.TIMESTAMP }}"
 
       - name: Notify Rollback
+        if: secrets.SLACK_WEBHOOK_URL != ''
         uses: slackapi/slack-github-action@v1.25
         with:
           webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
