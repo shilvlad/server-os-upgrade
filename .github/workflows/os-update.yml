@@ -163,7 +163,9 @@ jobs:
           retention-days: 14
 
       - name: Notify Slack on Update Start
-        if: secrets.SLACK_WEBHOOK_URL != ''
+        if: env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         uses: slackapi/slack-github-action@v1.25
         with:
           webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -524,7 +526,9 @@ jobs:
           fi
 
       - name: Notify Slack on Failure
-        if: steps.verdict.outputs.status == 'failed' && secrets.SLACK_WEBHOOK_URL != ''
+        if: steps.verdict.outputs.status == 'failed'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         uses: slackapi/slack-github-action@v1.25
         with:
           webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -586,7 +590,8 @@ jobs:
             --extra-vars "timestamp=${{ env.TIMESTAMP }}"
 
       - name: Notify Rollback
-        if: secrets.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         uses: slackapi/slack-github-action@v1.25
         with:
           webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
