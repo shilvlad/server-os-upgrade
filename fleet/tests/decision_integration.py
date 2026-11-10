@@ -64,10 +64,13 @@ def main():
                            "fleet_remote_python": str(worker)}
         inventory = directory / "inventory.json"
         inventory.write_text(json.dumps({"all": {"hosts": hosts}}))
+        overrides = directory / "stale-vars.json"
+        overrides.write_text(json.dumps({"fleet_action": "update"}))
         output = io.StringIO()
         with contextlib.redirect_stdout(output), patch.object(sys.stdin, "isatty", return_value=True), \
              patch("builtins.input", side_effect=["d", "2", "UPDATE"]):
-            code = launcher.main(["update", "-i", str(inventory), "--full-upgrade", "--reports", str(directory / "reports")])
+            code = launcher.main(["update", "-i", str(inventory), "--vars", str(overrides),
+                                  "--full-upgrade", "--reports", str(directory / "reports")])
         if code:
             print(output.getvalue())
         assert code == 0, "launcher failed"

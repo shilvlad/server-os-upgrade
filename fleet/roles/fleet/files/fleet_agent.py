@@ -149,6 +149,8 @@ def python_packages(venvs):
         if not libraries:
             errors.append("No site-packages found: " + venv)
         locations.update(libraries)
+    # lib64 can be a symlink to lib; count each physical site-packages once.
+    locations = {str(Path(location).resolve()) for location in locations}
     for location in sorted(locations):
         directory = Path(location)
         if not directory.exists():
@@ -249,7 +251,9 @@ def health(options):
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
             raise AgentError("HTTP checks require an http(s) URL without embedded credentials")
-        name = check.get("name") or parsed.hostname + parsed.path
+        name = check.get("name") or parsed.netloc + parsed.path
+        if not isinstance(name, str) or name in checks:
+            raise AgentError("HTTP check names must be unique strings")
         expected = int(check.get("expected_status", 200))
         timeout = max(1, min(int(check.get("timeout", 10)), 60))
         try:
@@ -258,6 +262,7 @@ def health(options):
             checks[name] = {"ok": code == expected, "status": code, "expected": expected}
         except urllib.error.HTTPError as error:
             checks[name] = {"ok": error.code == expected, "status": error.code, "expected": expected}
+            error.close()
         except (OSError, urllib.error.URLError, ValueError):
             # URLs and exception messages can contain secrets; retain the check name only.
             checks[name] = {"ok": False, "status": None, "expected": expected}
