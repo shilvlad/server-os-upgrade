@@ -15,6 +15,7 @@ class CallbackModule(CallbackBase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ssh_results = {}
+        self.errors = {}
 
     def record_ssh_result(self, result, state):
         if "fleet_ssh_probe" not in result._task.tags:
@@ -30,9 +31,17 @@ class CallbackModule(CallbackBase):
 
     def v2_runner_on_failed(self, result, ignore_errors=False):
         self.record_ssh_result(result, "error")
+        if not ignore_errors:
+            self.record_error(result)
 
     def v2_runner_on_unreachable(self, result):
         self.record_ssh_result(result, "error")
+        self.record_error(result)
+
+    def record_error(self, result):
+        raw = result._result
+        message = "Ошибка задачи; подробности в hosts/*.json" if raw.get("_ansible_no_log") else str(raw.get("msg", "Ошибка Ansible"))
+        self.errors[result._host.get_name()] = message[:4000]
 
     def v2_playbook_on_stats(self, stats):
         directory = os.environ.get("FLEET_REPORT_DIR")
@@ -42,6 +51,9 @@ class CallbackModule(CallbackBase):
             result = {host: stats.summarize(host) for host in sorted(stats.processed)}
             target = Path(directory) / "run-status.json"
             target.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+            target.chmod(0o600)
+            target = Path(directory) / "run-errors.json"
+            target.write_text(json.dumps(self.errors, ensure_ascii=False, indent=2) + "\n")
             target.chmod(0o600)
             if os.environ.get("FLEET_ACTION") == "check-ssh" or self.ssh_results:
                 target = Path(directory) / "ssh-results.json"

@@ -6,7 +6,11 @@ fleet_upgrade_mode: safe
 fleet_allow_astra_package_updates: false
 fleet_refresh_cache: false
 fleet_reboot: false
+fleet_preview_apply: false
+fleet_approved_plans: {}
+fleet_require_approved_plan: false
 fleet_critical_services: []
+fleet_http_checks: []
 fleet_venv_paths: []
 fleet_discovery_roots: [/opt, /usr/local, /srv]
 fleet_custom_probes: []

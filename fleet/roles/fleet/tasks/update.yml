@@ -6,6 +6,7 @@
       - fleet_action in ['plan', 'update']
       - fleet_action != 'update' or ansible_check_mode or fleet_confirm_update | bool
       - not (fleet_refresh_cache | bool) or fleet_action == 'plan' or fleet_action == 'update'
+      - not (fleet_require_approved_plan | bool) or inventory_hostname in fleet_approved_plans
     fail_msg: Для установки нужен fleet_confirm_update=true; режим обновления — safe или dist.
 
 - name: Сохранить состав ПО до обновления
@@ -39,10 +40,6 @@
   ansible.builtin.assert:
     that: fleet_plan_result.rc | default(1) == 0
     fail_msg: "Планирование не удалось: {{ fleet_plan_result.stderr | default('См. локальный plan.json.', true) }}"
-
-- name: Показать план обновления
-  ansible.builtin.debug:
-    msg: "{{ (fleet_plan_result.stdout | from_json).simulation }}"
 
 - name: Установить обновления из настроенных репозиториев
   when:

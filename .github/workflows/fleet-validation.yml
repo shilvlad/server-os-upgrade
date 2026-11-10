@@ -65,3 +65,6 @@ jobs:
       - name: SSH key authentication and failure reporting on loopback
         working-directory: fleet
         run: python tests/ssh_integration.py
+      - name: Preview and user selection through real Ansible with inert workers
+        working-directory: fleet
+        run: python tests/decision_integration.py
