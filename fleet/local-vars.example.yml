@@ -1,0 +1,17 @@
+---
+# Скопируйте в local-vars.yml. Этот рабочий файл исключён из Git.
+fleet_venv_paths:
+  - /opt/myapp/venv
+fleet_discovery_roots:
+  - /opt
+  - /usr/local
+  - /srv
+fleet_custom_probes:
+  - name: myapp
+    argv: [/opt/myapp/bin/myapp, --version]
+# Проверяются до и после обновления; имена должны соответствовать этому серверу.
+# Для разных серверов удобнее inventory/host_vars/<имя>.yml.
+fleet_critical_services: []
+# fleet_critical_services: [ssh, nginx, postgresql]
+# Системный Python для запуска сборщика; нужен Python 3.7+.
+fleet_remote_python: /usr/bin/python3

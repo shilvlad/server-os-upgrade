@@ -1,0 +1,15 @@
+---
+- name: Подготовить локальный каталог отчёта
+  ansible.builtin.import_playbook: prepare.yml
+
+- name: Посмотреть обновления без установки пакетов
+  hosts: all:!localhost
+  gather_facts: false
+  become: true
+  vars:
+    fleet_action: plan
+  tasks:
+    - name: Рассчитать обновления
+      ansible.builtin.import_role:
+        name: fleet
+        tasks_from: update

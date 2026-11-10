@@ -1,0 +1,19 @@
+---
+- name: Подготовить параметры агента и имя файла
+  ansible.builtin.set_fact:
+    fleet_host_file: "{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}-{{ (inventory_hostname | hash('sha256'))[:12] }}"
+    fleet_agent_options:
+      venv_paths: "{{ fleet_venv_paths }}"
+      discovery_roots: "{{ fleet_discovery_roots }}"
+      custom_probes: "{{ fleet_custom_probes }}"
+      critical_services: "{{ fleet_critical_services }}"
+      command_timeout: "{{ fleet_command_timeout | int }}"
+      min_root_free_mb: "{{ fleet_min_root_free_mb | int }}"
+      min_boot_free_mb: "{{ fleet_min_boot_free_mb | int }}"
+      lock_timeout: "{{ fleet_lock_timeout | int }}"
+      upgrade_mode: "{{ fleet_upgrade_mode }}"
+      allow_astra_package_updates: "{{ fleet_allow_astra_package_updates | bool }}"
+      refresh_cache: "{{ (fleet_refresh_cache | bool or fleet_action == 'update') and not ansible_check_mode }}"
+      confirmed: "{{ fleet_confirm_update | bool }}"
+      apply_requested: "{{ fleet_action == 'update' and not ansible_check_mode }}"
+      reboot_requested: "{{ fleet_reboot | bool }}"
