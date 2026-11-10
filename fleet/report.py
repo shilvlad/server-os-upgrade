@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 
+from display import human_models, save_human_reports
+
 
 def save_json(path, data):
     with path.open("w") as stream:
@@ -43,8 +45,6 @@ def build_reports(directory):
         "Missing collectors/hosts do not mean absence of software or vulnerabilities.",
         "Container digests identify images; their internal packages need separate SBOM/image scans.",
         "Review custom probe output before sharing. No data is uploaded automatically."]}
-    rows = ["# Инвентаризация ПО", "", "| Сервер | ОС | DEB | Пробелы сбора | Результат Ansible |",
-            "|---|---|---:|---|---|"]
     with (directory / "packages.csv").open("w", newline="") as stream:
         os.fchmod(stream.fileno(), 0o600)
         writer = csv.writer(stream)
@@ -60,8 +60,6 @@ def build_reports(directory):
                 gaps.append("unmanaged_candidates: partial")
             outcome = status.get(host, {})
             state = "ошибка" if outcome.get("failures", 0) or outcome.get("unreachable", 0) else "OK" if outcome else "нет статуса"
-            rows.append("| {} | {} | {} | {} | {} |".format(md(host), md(data["os"]["pretty_name"]),
-                        len(data["dpkg"]), md(", ".join(gaps) or "см. ограничения"), state))
             components = {}
             for name in ("python", "npm_global", "snap", "flatpak"):
                 component = data["components"][name]
@@ -82,17 +80,17 @@ def build_reports(directory):
                 "unmanaged_versions_unknown": len(data["unmanaged_candidates"]["items"]),
                 "collection_gaps": gaps, "snapshot_phase": item["phase"], "run_status": state})
     missing = sorted((set(expected) | set(status)) - {"localhost"} - set(hosts))
-    for host in missing:
-        rows.append("| {} | нет данных | — | сбор не завершён | ошибка/недоступен |".format(md(host)))
     review["missing_host_count"] = len(missing)
     review["run_incomplete"] = bool(missing or not status or any(
         value.get("failures", 0) or value.get("unreachable", 0) for value in status.values()))
+    metadata = json.loads(run_file.read_text()) if run_file.exists() else {}
+    action = metadata.get("action", "inventory")
+    if metadata.get("check_mode") and action == "update":
+        action = "plan"
+    models = human_models(directory, hosts)
+    review["run_incomplete"] = review["run_incomplete"] or any(model["state"] == "ОШИБКА" for model in models.values())
     save_json(directory / "review.json", review)
-    rows += ["", "Проверка уязвимостей не выполнялась. `not_available` означает отсутствие доступного сборщика,",
-             "а не доказанное отсутствие ПО. Локальные/rootless-установки других пользователей и пакеты",
-             "внутри контейнеров требуют отдельного сбора. `before` — снимок до попытки обновления.",
-             "", "Точные версии и состав: `inventory.json`, `packages.csv`; данные для разбора: `review.json`."]
-    target = directory / "summary.md"
-    target.write_text("\n".join(rows) + "\n")
-    target.chmod(0o600)
-    return {"hosts": hosts, "missing_hosts": missing, "complete": not review["run_incomplete"]}
+    text = save_human_reports(directory, models, action)
+    return {"hosts": hosts, "missing_hosts": missing, "complete": not review["run_incomplete"] and
+            bool(models) and all(model["state"] != "ОШИБКА" for model in models.values()),
+            "models": models, "text": text}

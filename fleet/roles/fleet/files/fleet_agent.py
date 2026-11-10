@@ -9,6 +9,7 @@ import base64
 import datetime
 from email.parser import Parser
 import glob
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,9 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import urllib.error
+import urllib.parse
+import urllib.request
 
 
 class AgentError(Exception):
@@ -239,10 +243,30 @@ def health(options):
         services[service] = {"active": result["rc"] == 0, "state": result["stdout"].strip()}
     failed = optional(["systemctl", "--failed", "--no-legend", "--plain", "--no-pager"],
                       lambda text: [line.split()[0] for line in text.splitlines() if line.strip()])
-    result = {"critical_services": services, "failed_units": failed,
+    checks = {}
+    for check in options.get("http_checks", []):
+        url = check.get("url", "")
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+            raise AgentError("HTTP checks require an http(s) URL without embedded credentials")
+        name = check.get("name") or parsed.hostname + parsed.path
+        expected = int(check.get("expected_status", 200))
+        timeout = max(1, min(int(check.get("timeout", 10)), 60))
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                code = response.status
+            checks[name] = {"ok": code == expected, "status": code, "expected": expected}
+        except urllib.error.HTTPError as error:
+            checks[name] = {"ok": error.code == expected, "status": error.code, "expected": expected}
+        except (OSError, urllib.error.URLError, ValueError):
+            # URLs and exception messages can contain secrets; retain the check name only.
+            checks[name] = {"ok": False, "status": None, "expected": expected}
+    result = {"critical_services": services, "failed_units": failed, "http_checks": checks,
               "reboot_required_marker": Path("/var/run/reboot-required").exists(), "kernel": platform.release()}
     if any(not item["active"] for item in services.values()):
         raise AgentError("A critical service is not active", result)
+    if any(not item["ok"] for item in checks.values()):
+        raise AgentError("An application HTTP check failed", result)
     return result
 
 
@@ -294,7 +318,16 @@ def plan(options):
         result["cache_refresh"] = refreshed
     result["simulation"] = required(apt_argv(options, simulate=True), timeout=None)
     result["cache_refreshed"] = bool(options.get("refresh_cache", False))
+    result["fingerprint"] = plan_fingerprint(result["simulation"], options)
+    result["apt_policy"] = run(["apt-cache", "policy"])
     return result
+
+
+def plan_fingerprint(simulation, options):
+    operations = sorted(line.strip() for line in simulation.splitlines()
+                        if line.startswith(("Inst ", "Conf ", "Remv ")))
+    payload = {"mode": options.get("upgrade_mode", "safe"), "operations": operations}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def update(options):
@@ -302,6 +335,10 @@ def update(options):
     packages_before = dpkg_packages()
     # Recalculate immediately before apply; fail on a removal request or resolver error.
     simulation = required(apt_argv(options, simulate=True), timeout=None)
+    approved = options.get("approved_plan_fingerprint")
+    if approved and plan_fingerprint(simulation, options) != approved:
+        raise AgentError("APT plan changed after approval; run the preview again and approve the new plan",
+                         {"simulation": simulation})
     # Do not kill apt/dpkg by a timeout in the middle of a transaction.
     transaction = run(apt_argv(options), timeout=None)
     result = {"before": before, "simulation": simulation, "transaction": transaction}

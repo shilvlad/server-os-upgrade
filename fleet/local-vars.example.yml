@@ -13,5 +13,14 @@ fleet_custom_probes:
 # Для разных серверов удобнее inventory/host_vars/<имя>.yml.
 fleet_critical_services: []
 # fleet_critical_services: [ssh, nginx, postgresql]
+# HTTP-проверки выполняются с самого сервера до и после обновления.
+# Для проверки nginx указывайте адрес приложения через nginx, а не только порт контейнера.
+# HTTP-редиректы следуют до конечного ответа; TLS-сертификат проверяется.
+fleet_http_checks: []
+# fleet_http_checks:
+#   - name: web-application
+#     url: https://app.example.com/health
+#     expected_status: 200
+#     timeout: 10
 # Системный Python для запуска сборщика; нужен Python 3.7+.
 fleet_remote_python: /usr/bin/python3

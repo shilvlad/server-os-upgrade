@@ -165,6 +165,7 @@ class UpdateTests(unittest.TestCase):
 
     def test_plan_does_not_refresh_cache_by_default(self):
         with patch.object(agent, "preflight", return_value={}), \
+             patch.object(agent, "run", return_value={"rc": 0, "stdout": "", "stderr": ""}), \
              patch.object(agent, "required", return_value="0 upgraded") as commands:
             result = agent.plan({})
         self.assertFalse(result["cache_refreshed"])
