@@ -1,0 +1,107 @@
+---
+- name: Подключить security-репозиторий Ubuntu
+  hosts: all
+  become: true
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+  vars:
+    fleet_security_source: /etc/apt/sources.list.d/fleet-ubuntu-security.sources
+    fleet_security_keyring: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+    fleet_security_archive: "a={{ ansible_facts['distribution_release'] }}-security,"
+  pre_tasks:
+    - name: Проверить поддерживаемую ОС и архитектуру
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_facts['distribution_release'] in ['jammy', 'noble']
+          - ansible_facts['architecture'] == 'x86_64'
+        fail_msg: Этот плейбук рассчитан на Ubuntu 22.04/24.04 amd64.
+
+    - name: Проверить штатный ключ доверия Ubuntu
+      ansible.builtin.stat:
+        path: "{{ fleet_security_keyring }}"
+      register: fleet_security_key
+
+    - name: Убедиться в наличии ключа архива
+      ansible.builtin.assert:
+        that: fleet_security_key.stat.isreg | default(false)
+        fail_msg: Не найден штатный ubuntu-archive-keyring; настройте доверенный ключ Ubuntu перед продолжением.
+
+    - name: Прочитать текущие индексы APT
+      ansible.builtin.command: apt-cache policy
+      register: fleet_security_before
+      changed_when: false
+      check_mode: false
+
+    - name: Определить наличие активного security-индекса нужного выпуска
+      ansible.builtin.set_fact:
+        fleet_security_present: "{{ fleet_security_archive in fleet_security_before.stdout }}"
+
+  tasks:
+    - name: Подключить источник и проверить результат
+      block:
+        - name: Добавить официальный security-источник при отсутствии индекса
+          ansible.builtin.copy:
+            dest: "{{ fleet_security_source }}"
+            content: |
+              Types: deb
+              URIs: https://security.ubuntu.com/ubuntu/
+              Suites: {{ ansible_facts['distribution_release'] }}-security
+              Components: main restricted universe multiverse
+              Architectures: amd64
+              Signed-By: {{ fleet_security_keyring }}
+            owner: root
+            group: root
+            mode: '0644'
+            backup: true
+          register: fleet_security_write
+          when: not fleet_security_present | bool
+
+        - name: Обновить индексы после подключения security
+          ansible.builtin.apt:
+            update_cache: true
+            auto_install_module_deps: false
+            lock_timeout: 300
+          when:
+            - not fleet_security_present | bool
+            - not ansible_check_mode
+
+        - name: Повторно прочитать индексы APT
+          ansible.builtin.command: apt-cache policy
+          register: fleet_security_after
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: Подтвердить появление security-индекса
+          ansible.builtin.assert:
+            that: fleet_security_archive in fleet_security_after.stdout
+            fail_msg: Security-индекс не появился после обновления APT.
+            success_msg: "Подтверждён индекс {{ ansible_facts['distribution_release'] }}-security."
+          when: not ansible_check_mode
+
+      rescue:
+        - name: Восстановить прежний управляемый файл при ошибке
+          ansible.builtin.copy:
+            src: "{{ fleet_security_write.backup_file }}"
+            dest: "{{ fleet_security_source }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: '0644'
+          when:
+            - fleet_security_write.backup_file | default('') | length > 0
+            - not ansible_check_mode
+
+        - name: Убрать новый файл при ошибке первого подключения
+          ansible.builtin.file:
+            path: "{{ fleet_security_source }}"
+            state: absent
+          when:
+            - fleet_security_write.changed | default(false)
+            - fleet_security_write.backup_file | default('') | length == 0
+            - not ansible_check_mode
+
+        - name: Сообщить о неудачном подключении репозитория
+          ansible.builtin.fail:
+            msg: "Подключение security не завершено: {{ ansible_failed_result.msg | default('проверьте вывод предыдущей задачи') }}"
