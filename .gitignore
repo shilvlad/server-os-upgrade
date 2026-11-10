@@ -11,3 +11,20 @@
 /fleet/reports/
 __pycache__/
 *.pyc
+
+# Локальные секреты и данные при запуске из корня проекта
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+id_ecdsa
+id_dsa
+/.venv/
+/servers.txt
+/local-vars.yml
+/reports/
