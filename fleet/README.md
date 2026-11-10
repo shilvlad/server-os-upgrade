@@ -168,6 +168,35 @@ shell, конвейеры и подстановка команд не выпол
 
 ## Как работает обновление
 
+### Подключение отсутствующего security-репозитория Ubuntu
+
+Если `apt-cache policy` не содержит `jammy-security`/`noble-security`, можно использовать
+отдельный плейбук для **Ubuntu 22.04/24.04 amd64**. На целевых серверах нужен
+системный Python 3.9+ и `python3-apt`. Действующий SSH config используется как обычно.
+
+Сначала просмотрите изменение:
+
+```bash
+ansible-playbook -i inventory/generated.json playbooks/ubuntu-security.yml --check --diff
+```
+
+Применение источника и обновление индексов:
+
+```bash
+ansible-playbook -i inventory/generated.json playbooks/ubuntu-security.yml
+python run.py plan --hosts servers.txt --refresh-cache --full-upgrade
+```
+
+Плейбук определяет выпуск Ubuntu, проверяет штатный ключ архива и при отсутствии
+security-индекса создаёт `/etc/apt/sources.list.d/fleet-ubuntu-security.sources`.
+Источник — `https://security.ubuntu.com/ubuntu/`, подпись проверяется через
+`ubuntu-archive-keyring.gpg`. После обновления индексов проверяется появление нужного
+security pocket. При ошибке обновления/проверки новое изменение файла откатывается.
+Повторный запуск при уже доступном security-индексе не создаёт дополнительный источник.
+Пакеты приложений и ОС устанавливаются отдельным действием `update`.
+
+### Установка пакетов
+
 1. Проверяет ОС, `dpkg --audit`, критичные сервисы, свободное место на `/`, `/var`, `/boot`.
    По умолчанию минимум 2048 MiB для `/` и `/var`, 200 MiB для `/boot`; эти пороги
    настраиваются через `fleet_min_root_free_mb`, `fleet_min_boot_free_mb` и не заменяют
