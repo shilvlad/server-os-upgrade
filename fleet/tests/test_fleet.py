@@ -9,7 +9,9 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from report import build_reports, cell
-from run import load_ips
+import run as launcher
+from run import load_hosts
+from ssh_report import build_ssh_report
 
 spec = importlib.util.spec_from_file_location("fleet_agent", ROOT / "roles/fleet/files/fleet_agent.py")
 agent = importlib.util.module_from_spec(spec)
@@ -50,10 +52,89 @@ class InventoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             filename = Path(temp) / "ips"
             filename.write_text("# comment\n192.0.2.1 # node\n192.0.2.1\n2001:db8::1\n")
-            self.assertEqual(load_ips(filename), ["192.0.2.1", "2001:db8::1"])
+            self.assertEqual(load_hosts(filename), ["192.0.2.1", "2001:db8::1"])
             filename.write_text("192.0.2.1; touch bad\n")
             with self.assertRaises(ValueError):
-                load_ips(filename)
+                load_hosts(filename)
+
+    def test_ip_dns_short_names_and_idna_without_network_lookups(self):
+        with tempfile.TemporaryDirectory() as temp:
+            filename = Path(temp) / "servers.txt"
+            filename.write_text("192.0.2.1\n2001:0db8::1\nAPP01.example.com\napp01.example.com.\n"
+                                "db01 # short DNS name\nсервер.рф\n")
+            self.assertEqual(load_hosts(filename), ["192.0.2.1", "2001:db8::1", "app01.example.com",
+                                                   "db01", "xn--b1afb6bcb.xn--p1ai"])
+
+    def test_invalid_targets_are_not_reinterpreted_as_hostnames(self):
+        for value in ("999.0.2.1", "2001:db8:::1", "https://host.example", "user@host.example",
+                      "host.example:22", "-bad.example", "bad..example", "bad_.example", "host;id",
+                      "a" * 64 + ".example", "localhost", "localhost."):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as temp:
+                filename = Path(temp) / "servers.txt"
+                filename.write_text(value + "\n")
+                with self.assertRaises(ValueError):
+                    load_hosts(filename)
+
+
+class SshTests(unittest.TestCase):
+    def test_summary_includes_success_failure_and_unattempted_hosts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            expected = ["up.example", "bad.example", "unattempted.example"]
+            (directory / "run.json").write_text(json.dumps({"expected_hosts": expected}))
+            (directory / "ssh-results.json").write_text(json.dumps({
+                "up.example": {"status": "ok", "rc": 0, "message": ""},
+                "bad.example": {"status": "error", "rc": None,
+                                "message": "ssh: Could not resolve hostname bad.example: Name or service not known"}}))
+            (directory / "run-status.json").write_text(json.dumps({"up.example": {"failures": 0},
+                                                                   "bad.example": {"unreachable": 1}}))
+            result = build_ssh_report(directory)
+            self.assertEqual(result["reachable"], 1)
+            self.assertEqual(result["failed"], 2)
+            self.assertFalse(result["complete"])
+            self.assertEqual(result["hosts"]["bad.example"]["reason_code"], "dns")
+            self.assertEqual(result["hosts"]["unattempted.example"]["status"], "not_checked")
+            self.assertFalse((directory / "review.json").exists())
+            self.assertEqual((directory / "ssh-check.json").stat().st_mode & 0o777, 0o600)
+
+    def test_menu_selects_key_only_ssh_and_does_not_request_sudo(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "servers.txt").write_text("up.example\n")
+            calls = []
+            def execute(command, **kwargs):
+                calls.append(command)
+                if "--list-hosts" in command:
+                    return subprocess_result("      up.example\n")
+                directory = Path(kwargs["env"]["FLEET_REPORT_DIR"])
+                (directory / "run-status.json").write_text(json.dumps({"up.example": {"ok": 1}}))
+                (directory / "ssh-results.json").write_text(json.dumps({
+                    "up.example": {"status": "ok", "rc": 0, "message": ""}}))
+                return subprocess_result("")
+            with patch.object(launcher, "ROOT", root), patch.object(launcher.sys.stdin, "isatty", return_value=True), \
+                 patch("builtins.input", return_value="4"), patch.object(launcher.shutil, "which", return_value="ansible-playbook"), \
+                 patch.object(launcher.subprocess, "run", side_effect=execute), \
+                 patch("builtins.print"):
+                code = launcher.main(["--private-key", "/test/key", "-K", "--reports", str(root / "reports")])
+            self.assertEqual(code, 0)
+            command = calls[-1]
+            self.assertIn(str(root / "playbooks/check-ssh.yml"), command)
+            self.assertNotIn("--ask-become-pass", command)
+            options = json.loads(command[command.index("-e") + 1])
+            self.assertEqual(options["ansible_connection"], "ssh")
+            self.assertFalse(options["ansible_become"])
+            self.assertIn("PreferredAuthentications=publickey", options["ansible_ssh_args"])
+            self.assertIn("BatchMode=yes", options["ansible_ssh_args"])
+            self.assertIn("ControlPath=none", options["ansible_ssh_args"])
+            self.assertIn("StrictHostKeyChecking=yes", options["ansible_ssh_args"])
+            self.assertIn("IdentitiesOnly=yes", options["ansible_ssh_args"])
+            generated = json.loads((root / "inventory/generated.json").read_text())
+            self.assertIn("up.example", generated["all"]["children"]["linux"]["hosts"])
+
+
+def subprocess_result(stdout, code=0):
+    from types import SimpleNamespace
+    return SimpleNamespace(stdout=stdout, stderr="", returncode=code)
 
 
 class UpdateTests(unittest.TestCase):

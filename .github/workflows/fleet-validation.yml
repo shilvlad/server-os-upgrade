@@ -16,12 +16,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ansible: ['2.20', '2.21']
+        include:
+          - ansible: '2.20'
+            python: '3.12'
+          - ansible: '2.21'
+            python: '3.12'
+          - ansible: '2.21'
+            python: '3.14'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python }}
       - name: Install controller dependencies
         env:
           ANSIBLE_MINOR: ${{ matrix.ansible }}
@@ -56,3 +62,6 @@ jobs:
               assert len(review['hosts']) == 1 and not review['run_incomplete']
               assert not list(runs[0].parent.glob('hosts/*-update.json'))
           PY
+      - name: SSH key authentication and failure reporting on loopback
+        working-directory: fleet
+        run: python tests/ssh_integration.py
