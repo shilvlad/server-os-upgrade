@@ -1,6 +1,6 @@
 ---
 - name: Проверить SSH-доступ ко всем выбранным серверам
-  hosts: all:!localhost
+  hosts: all
   gather_facts: false
   become: false
   vars:

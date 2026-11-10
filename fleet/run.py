@@ -128,7 +128,8 @@ def main(argv=None):
         if not inventory.exists():
             parser.error("Передайте --hosts servers.txt или -i inventory/hosts.yml")
     playbook = ROOT / "playbooks" / (args.action + ".yml")
-    command = [ansible, "-i", str(inventory), str(playbook), "--limit", args.limit + ",localhost"]
+    selected_limit = args.limit if args.action == "check-ssh" else args.limit + ",localhost"
+    command = [ansible, "-i", str(inventory), str(playbook), "--limit", selected_limit]
     if args.user:
         command += ["-u", args.user]
     if args.private_key:
@@ -171,7 +172,10 @@ def main(argv=None):
     if listing.returncode:
         print(listing.stderr, file=sys.stderr)
         return listing.returncode
-    expected = sorted(set(re.findall(r"^      (.+)$", listing.stdout, re.MULTILINE)) - {"localhost"})
+    expected = set(re.findall(r"^      (.+)$", listing.stdout, re.MULTILINE))
+    if args.action != "check-ssh":
+        expected.discard("localhost")
+    expected = sorted(expected)
     if not expected:
         parser.error("Выбранный inventory/--limit не содержит целевых серверов")
     if args.action == "update" and not args.check:
