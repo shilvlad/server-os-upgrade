@@ -1,0 +1,125 @@
+---
+- name: Проверить параметры обновления
+  ansible.builtin.assert:
+    that:
+      - fleet_upgrade_mode in ['safe', 'dist']
+      - fleet_action in ['plan', 'update']
+      - fleet_action != 'update' or ansible_check_mode or fleet_confirm_update | bool
+      - not (fleet_refresh_cache | bool) or fleet_action == 'plan' or fleet_action == 'update'
+    fail_msg: Для установки нужен fleet_confirm_update=true; режим обновления — safe или dist.
+
+- name: Сохранить состав ПО до обновления
+  ansible.builtin.include_tasks: inventory.yml
+  vars:
+    fleet_snapshot_label: before
+
+- name: Проверить систему и рассчитать план APT
+  ansible.builtin.script:
+    cmd: "fleet_agent.py plan --options {{ fleet_agent_options | to_json | b64encode | quote }}"
+    executable: "{{ fleet_remote_python }}"
+  register: fleet_plan_result
+  changed_when: fleet_agent_options.refresh_cache | bool
+  failed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Сохранить результат планирования
+  ansible.builtin.copy:
+    content: "{{ {'report_type': 'plan', 'host': inventory_hostname, 'result': fleet_plan_result} | to_nice_json }}"
+    dest: "{{ fleet_report_dir }}/hosts/{{ fleet_host_file }}-plan.json"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  check_mode: false
+  diff: false
+
+- name: Проверить успешность предварительных проверок
+  ansible.builtin.assert:
+    that: fleet_plan_result.rc | default(1) == 0
+    fail_msg: "Планирование не удалось: {{ fleet_plan_result.stderr | default('См. локальный plan.json.', true) }}"
+
+- name: Показать план обновления
+  ansible.builtin.debug:
+    msg: "{{ (fleet_plan_result.stdout | from_json).simulation }}"
+
+- name: Установить обновления из настроенных репозиториев
+  when:
+    - fleet_action == 'update'
+    - not ansible_check_mode
+  block:
+    - name: Выполнить обновление пакетов
+      ansible.builtin.script:
+        cmd: "fleet_agent.py update --options {{ fleet_agent_options | to_json | b64encode | quote }}"
+        executable: "{{ fleet_remote_python }}"
+      register: fleet_update_result
+      changed_when: >-
+        fleet_update_result.rc | default(1) == 0 and
+        (fleet_update_result.stdout | from_json).packages_changed | default(false)
+      failed_when: false
+      no_log: true
+
+    - name: Сохранить результат установки независимо от её успеха
+      ansible.builtin.copy:
+        content: "{{ {'report_type': 'update', 'host': inventory_hostname, 'result': fleet_update_result} | to_nice_json }}"
+        dest: "{{ fleet_report_dir }}/hosts/{{ fleet_host_file }}-update.json"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+      vars:
+        ansible_python_interpreter: "{{ ansible_playbook_python }}"
+      diff: false
+
+    - name: Проверить успешность установки
+      ansible.builtin.assert:
+        that: fleet_update_result.rc | default(1) == 0
+        fail_msg: "Обновление не завершено: {{ fleet_update_result.stderr | default('См. локальный update.json.', true) }}"
+
+    - name: Перезагрузить сервер при явном выборе пользователя
+      ansible.builtin.reboot:
+        reboot_timeout: 900
+        post_reboot_delay: 20
+        test_command: /usr/bin/true
+        msg: Перезагрузка после Ansible-обновления, выбранная оператором
+      when: fleet_reboot | bool
+      vars:
+        ansible_python_interpreter: "{{ fleet_remote_python }}"
+
+    - name: Проверить состояние после обновления и перезагрузки
+      ansible.builtin.script:
+        cmd: "fleet_agent.py health --options {{ fleet_agent_options | to_json | b64encode | quote }}"
+        executable: "{{ fleet_remote_python }}"
+      register: fleet_health_result
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Сохранить итоговую проверку
+      ansible.builtin.copy:
+        content: "{{ {'report_type': 'health', 'host': inventory_hostname, 'result': fleet_health_result} | to_nice_json }}"
+        dest: "{{ fleet_report_dir }}/hosts/{{ fleet_host_file }}-health.json"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+      vars:
+        ansible_python_interpreter: "{{ ansible_playbook_python }}"
+      diff: false
+
+    - name: Остановить обработку при неработающих критичных сервисах
+      ansible.builtin.assert:
+        that:
+          - fleet_health_result.rc | default(1) == 0
+        fail_msg: "Проверка сервисов не пройдена: {{ fleet_health_result.stderr | default('См. health.json.', true) }}"
+
+    - name: Проверить отсутствие новых failed units после перезагрузки
+      ansible.builtin.assert:
+        that: >-
+          ((fleet_health_result.stdout | from_json).failed_units['items'] |
+          difference((fleet_plan_result.stdout | from_json).health.failed_units['items']) | length) == 0
+        fail_msg: После обновления появились новые failed units; обработка следующих серверов остановлена.
+
+    - name: Сохранить состав ПО после обновления
+      ansible.builtin.include_tasks: inventory.yml
+      vars:
+        fleet_snapshot_label: after

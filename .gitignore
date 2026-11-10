@@ -1,1 +1,13 @@
 /.idea/
+
+# Локальные данные нового Ansible-проекта
+/fleet/.venv/
+/fleet/servers.txt
+/fleet/inventory/hosts.yml
+/fleet/inventory/generated.json
+/fleet/inventory/group_vars/
+/fleet/inventory/host_vars/
+/fleet/local-vars.yml
+/fleet/reports/
+__pycache__/
+*.pyc

@@ -1,0 +1,58 @@
+name: Validate Linux fleet tools
+
+on:
+  push:
+    paths: ['fleet/**', '.github/workflows/fleet-validation.yml']
+  pull_request:
+    paths: ['fleet/**', '.github/workflows/fleet-validation.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ansible: ['2.20', '2.21']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install controller dependencies
+        env:
+          ANSIBLE_MINOR: ${{ matrix.ansible }}
+        run: python -m pip install "ansible-core~=${ANSIBLE_MINOR}.0" 'ansible-lint>=25,<27'
+      - name: Unit and policy checks
+        working-directory: fleet
+        run: |
+          python -m unittest discover -s tests -v
+          ansible-lint --offline playbooks/*.yml roles/fleet/tasks/*.yml roles/fleet/defaults/main.yml
+      - name: Read-only integration on this disposable runner
+        working-directory: fleet
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          Path('/tmp/fleet-ci-inventory.json').write_text(json.dumps({'all': {'hosts': {'fixture-node': {
+              'ansible_connection': 'local', 'ansible_become': False,
+              'fleet_remote_python': '/usr/bin/python3', 'fleet_discovery_roots': [],
+              'fleet_min_root_free_mb': 0, 'fleet_min_boot_free_mb': 0
+          }}}}))
+          PY
+          python run.py inventory -i /tmp/fleet-ci-inventory.json --reports /tmp/fleet-ci-inventory
+          python run.py update -i /tmp/fleet-ci-inventory.json --check --reports /tmp/fleet-ci-plan
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for root in ['/tmp/fleet-ci-inventory', '/tmp/fleet-ci-plan']:
+              runs = list(Path(root).glob('*/run.json'))
+              assert len(runs) == 1
+              assert json.loads(runs[0].read_text())['exit_code'] == 0
+              review = json.loads((runs[0].parent / 'review.json').read_text())
+              assert len(review['hosts']) == 1 and not review['run_incomplete']
+              assert not list(runs[0].parent.glob('hosts/*-update.json'))
+          PY

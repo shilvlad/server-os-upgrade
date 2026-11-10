@@ -1,0 +1,3 @@
+---
+- name: Собрать инвентаризацию по умолчанию
+  ansible.builtin.import_tasks: inventory.yml

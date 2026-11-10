@@ -1,0 +1,23 @@
+---
+- name: Подготовить отчёты на машине запуска
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  tasks:
+    - name: Проверить заданный каталог отчёта
+      ansible.builtin.assert:
+        that:
+          - fleet_report_dir is defined
+          - fleet_report_dir is string
+          - fleet_report_dir is match('^/')
+        fail_msg: Используйте run.py или задайте абсолютный fleet_report_dir через -e.
+
+    - name: Создать локальный каталог с ограниченным доступом
+      ansible.builtin.file:
+        path: "{{ fleet_report_dir }}/hosts"
+        state: directory
+        mode: '0700'
+      check_mode: false

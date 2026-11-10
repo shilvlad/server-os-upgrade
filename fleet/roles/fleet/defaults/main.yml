@@ -1,0 +1,16 @@
+---
+fleet_remote_python: /usr/bin/python3
+fleet_action: plan
+fleet_confirm_update: false
+fleet_upgrade_mode: safe
+fleet_allow_astra_package_updates: false
+fleet_refresh_cache: false
+fleet_reboot: false
+fleet_critical_services: []
+fleet_venv_paths: []
+fleet_discovery_roots: [/opt, /usr/local, /srv]
+fleet_custom_probes: []
+fleet_command_timeout: 60
+fleet_min_root_free_mb: 2048
+fleet_min_boot_free_mb: 200
+fleet_lock_timeout: 300

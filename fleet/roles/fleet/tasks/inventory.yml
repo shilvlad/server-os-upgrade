@@ -1,0 +1,35 @@
+---
+- name: Подготовить параметры сбора
+  ansible.builtin.import_tasks: options.yml
+
+- name: Собрать ОС, пакеты и доступные источники ПО
+  ansible.builtin.script:
+    cmd: "fleet_agent.py inventory --options {{ fleet_agent_options | to_json | b64encode | quote }}"
+    executable: "{{ fleet_remote_python }}"
+  register: fleet_inventory_result
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Проверить результат сбора
+  ansible.builtin.assert:
+    that: fleet_inventory_result.rc | default(1) == 0
+    fail_msg: >-
+      Ошибка инвентаризации {{ inventory_hostname }}:
+      {{ fleet_inventory_result.stderr | default('Проверьте SSH, sudo и наличие Python 3.7+.', true) }}
+
+- name: Сохранить инвентаризацию локально
+  ansible.builtin.copy:
+    content: >-
+      {{ {'report_type': 'inventory', 'phase': fleet_snapshot_label | default('inventory'),
+          'host': inventory_hostname, 'address': ansible_host | default(inventory_hostname),
+          'data': fleet_inventory_result.stdout | from_json} | to_nice_json }}
+    dest: "{{ fleet_report_dir }}/hosts/{{ fleet_host_file }}-{{ fleet_snapshot_label | default('inventory') }}.json"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  check_mode: false
+  diff: false

@@ -1,0 +1,17 @@
+---
+- name: Подготовить локальный каталог отчёта
+  ansible.builtin.import_playbook: prepare.yml
+
+- name: Последовательно обновить серверы
+  hosts: all:!localhost
+  gather_facts: false
+  become: true
+  serial: 1
+  any_errors_fatal: true
+  vars:
+    fleet_action: update
+  tasks:
+    - name: Обновить систему
+      ansible.builtin.import_role:
+        name: fleet
+        tasks_from: update
