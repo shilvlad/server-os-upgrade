@@ -50,6 +50,38 @@ def write_host(directory, host, phase="before", updating=False, malformed=False)
 
 
 class PresentationTests(unittest.TestCase):
+    def test_immediate_post_apt_failure_keeps_installed_packages_and_http_result(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            (directory / "run.json").write_text(json.dumps({"action": "update", "expected_hosts": ["app"]}))
+            (directory / "run-status.json").write_text(json.dumps({"app": {"failures": 1}}))
+            write_host(directory, "app")
+            failure = {"status": "failed", "error": "An application HTTP check failed", "details": {
+                "transaction": {"rc": 0}, "changed_packages": [{"name": "nginx", "version": "1.24-2"}],
+                "after": {"kernel": "running-kernel", "http_checks": {"web": {"status": 502, "ok": False}}}}}
+            (directory / "hosts/app-update.json").write_text(json.dumps({"host": "app", "report_type": "update",
+                "result": {"rc": 1, "stdout": json.dumps(failure)}}))
+            result = build_reports(directory)
+            self.assertFalse(result["complete"])
+            self.assertIn("APT завершён. Фактически установлены/изменены: 1 пакетов", result["text"])
+            self.assertIn("HTTP 502 (ОШИБКА)", result["text"])
+            self.assertIn("работающее ядро: running-kernel", result["text"])
+            self.assertNotIn("ОБНОВЛЕНО", result["text"])
+
+    def test_partial_collector_is_reported_as_incomplete(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            (directory / "run.json").write_text(json.dumps({"action": "inventory", "expected_hosts": ["app"]}))
+            (directory / "run-status.json").write_text(json.dumps({"app": {"failures": 0}}))
+            write_host(directory, "app")
+            path = directory / "hosts/app-before.json"
+            item = json.loads(path.read_text())
+            item["data"]["components"]["python"]["status"] = "partial"
+            path.write_text(json.dumps(item))
+            result = build_reports(directory)
+            self.assertIn("неполный сбор, записей: 1", result["text"])
+            self.assertIn("ВНИМАНИЕ: Ошибки или неполный сбор ПО: python", result["text"])
+
     def test_counts_versions_new_kernel_and_phasing_are_shown(self):
         parsed = parse_simulation(SIMULATION)
         self.assertTrue(parsed["valid"])
@@ -189,6 +221,26 @@ class ApprovalTests(unittest.TestCase):
 
 
 class ApplyGuardTests(unittest.TestCase):
+    def test_duplicate_http_name_cannot_overwrite_a_failure(self):
+        error = urllib.error.HTTPError("http://127.0.0.1:8000/health", 502, "Bad Gateway", {}, io.BytesIO())
+        with patch.object(agent, "optional", return_value={"status": "ok", "items": []}), \
+             patch.object(agent.urllib.request, "urlopen", side_effect=error) as request:
+            with self.assertRaisesRegex(agent.AgentError, "names must be unique"):
+                agent.health({"http_checks": [
+                    {"name": "web", "url": "http://127.0.0.1:8000/health"},
+                    {"name": "web", "url": "http://127.0.0.1:9000/health"}]})
+        self.assertEqual(request.call_count, 1)
+
+    def test_default_http_names_preserve_different_ports(self):
+        from unittest.mock import MagicMock
+        response = MagicMock()
+        response.__enter__.return_value.status = 200
+        with patch.object(agent, "optional", return_value={"status": "ok", "items": []}), \
+             patch.object(agent.urllib.request, "urlopen", return_value=response):
+            result = agent.health({"http_checks": [
+                {"url": "http://127.0.0.1:8000/health"}, {"url": "http://127.0.0.1:9000/health"}]})
+        self.assertEqual(set(result["http_checks"]), {"127.0.0.1:8000/health", "127.0.0.1:9000/health"})
+
     def test_changed_candidate_is_rejected_before_apt_transaction(self):
         options = {"confirmed": True, "upgrade_mode": "dist",
                    "approved_plan_fingerprint": agent.plan_fingerprint(SIMULATION, {"upgrade_mode": "dist"})}

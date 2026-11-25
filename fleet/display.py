@@ -21,6 +21,7 @@ def friendly_error(message):
         ("APT plan changed after approval", "План APT изменился после подтверждения. Установка не начата: заново просмотрите план."),
         ("APT index refresh failed", "Не удалось полностью получить индексы APT. Проверьте доступность репозиториев."),
         ("An application HTTP check failed", "HTTP-проверка приложения не прошла. Проверьте адрес приложения и nginx."),
+        ("HTTP check names must be unique", "Имена HTTP-проверок повторяются. Задайте каждой проверке отдельное имя."),
         ("A critical service is not active", "Одна из заданных критичных служб не работает."),
         ("Insufficient free space", "Не хватает свободного места: " + str(message)),
         ("dpkg --audit", "DPKG сообщает об ошибке или незавершённой настройке пакетов. Подробности в техническом результате."),
@@ -101,10 +102,15 @@ def human_models(directory, inventories):
             failed = True
             error = error or "Полный план установки не получен или его состав не распознан."
         applied = record.get("update", {})
+        applied_payload = applied.get("data", {})
+        applied_details = applied_payload.get("details", applied_payload)
+        apt_completed = applied.get("rc") == 0 or applied_details.get("transaction", {}).get("rc") == 0
         health_result = record.get("health", {})
         applied_ok = bool(applied and applied.get("rc") == 0)
         after = health_result.get("data", {})
         after = after.get("details", after)
+        if not after:
+            after = applied_details.get("after", {})
         complete_update = bool(applied_ok and health_result.get("rc") == 0 and item.get("phase") == "after" and not failed)
         if action == "update" and not run.get("check_mode") and not run.get("preview_only") and not complete_update:
             failed = True
@@ -133,16 +139,17 @@ def human_models(directory, inventories):
                 elif not re.search(r"a=" + re.escape(codename) + r"-security(?:,|\s)", policy.get("stdout", "")):
                     warnings.append("В индексах APT отсутствует " + codename + "-security.")
         components = inventory.get("components", {})
-        gaps = [name for name, value in components.items() if value.get("status") == "error"]
+        gaps = [name for name, value in components.items() if value.get("status") in ("error", "partial")]
         if gaps:
-            warnings.append("Ошибки сбора ПО: " + ", ".join(gaps))
+            warnings.append("Ошибки или неполный сбор ПО: " + ", ".join(gaps))
         state = "ОШИБКА" if failed else "ОБНОВЛЕНО" if complete_update else "ПЛАН ГОТОВ" if planning else "СОБРАНО"
         models[host] = {"host": host, "state": state, "error": friendly_error(error), "warnings": warnings,
             "os": inventory.get("os", plan.get("os", {})).get("pretty_name", "нет данных"),
-            "kernel": inventory.get("kernel", before_health.get("kernel", "нет данных")),
+            "kernel": after.get("kernel") or inventory.get("kernel", before_health.get("kernel", "нет данных")),
             "plan": parsed, "plan_data": plan, "ready": bool(planning and not failed and parsed["valid"]),
             "fingerprint": plan.get("fingerprint", ""), "reboot": bool(run.get("reboot_requested")),
             "inventory": inventory, "applied": applied, "health": after, "phase": item.get("phase", ""),
+            "apt_completed": apt_completed, "changed_packages": applied_details.get("changed_packages"),
             "action": action, "check_mode": run.get("check_mode", False), "update_complete": complete_update,
             "started_at": run.get("started_at"), "mode": run.get("upgrade_mode", "safe")}
     return models
@@ -193,9 +200,10 @@ def render(models, action, details=False):
                     lines.append("     {}: {} → {}".format(package["name"], package["before"] or "новый пакет", package["after"]))
             if not details and len(packages) < len(plan["packages"]):
                 lines.append("   Остальные пакеты ({}) — в полном списке изменений.".format(len(plan["packages"]) - len(packages)))
-            if model["applied"].get("rc") == 0:
-                changed = model["applied"].get("data", {}).get("changed_packages", [])
-                lines.append("   APT завершён. Фактически установлены/изменены: {} пакетов.".format(len(changed)))
+            if model["apt_completed"]:
+                changed = model["changed_packages"]
+                lines.append("   APT завершён. " + ("Фактически установлены/изменены: {} пакетов.".format(len(changed))
+                                                    if changed is not None else "Количество изменённых пакетов не подтверждено."))
             if model["health"]:
                 if model["health"].get("reboot_required_marker"):
                     lines.append("   После обновления ОС сообщает: требуется перезагрузка.")
@@ -223,7 +231,8 @@ def render(models, action, details=False):
                 labels = {"python": "Python-библиотеки", "npm_global": "Глобальные npm-пакеты", "snap": "Snap", "flatpak": "Flatpak",
                           "docker_images": "Образы Docker", "docker_containers": "Контейнеры Docker",
                           "podman_images": "Образы Podman", "podman_containers": "Контейнеры Podman"}
-                states = {"ok": str(len(component.get("items", []))), "not_available": "сборщик недоступен", "error": "ошибка сбора"}
+                states = {"ok": str(len(component.get("items", []))), "not_available": "сборщик недоступен", "error": "ошибка сбора",
+                          "partial": "неполный сбор, записей: " + str(len(component.get("items", [])))}
                 lines.append("   {}: {}.".format(labels.get(name, name), states.get(component.get("status"), "неизвестно")))
         for warning in model["warnings"]:
             lines.append("   ВНИМАНИЕ: " + warning)

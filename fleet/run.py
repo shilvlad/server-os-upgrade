@@ -195,7 +195,10 @@ def main(argv=None):
                        ANSIBLE_NOCOLOR="1", ANSIBLE_STDOUT_CALLBACK="default" if args.verbose else "fleet_console")
 
     def command_for(action, limit, extra):
-        return common + [str(ROOT / "playbooks" / (action + ".yml")), "--limit", limit, "-e", json.dumps(extra)]
+        # Extra vars outrank play vars: a stale fleet_action in --vars must never
+        # turn the preview into an update before the operator confirms it.
+        stage_options = dict(extra, fleet_action=action)
+        return common + [str(ROOT / "playbooks" / (action + ".yml")), "--limit", limit, "-e", json.dumps(stage_options)]
 
     # Resolve the initial scope without connecting to any remote host.
     first_action = "plan" if real_update else args.action

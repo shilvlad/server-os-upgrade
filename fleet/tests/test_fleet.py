@@ -19,6 +19,17 @@ spec.loader.exec_module(agent)
 
 
 class InventoryTests(unittest.TestCase):
+    def test_venv_lib64_symlink_does_not_duplicate_packages(self):
+        with tempfile.TemporaryDirectory() as temp:
+            venv = Path(temp)
+            package = venv / "lib/python3.11/site-packages/example-1.2.dist-info"
+            package.mkdir(parents=True)
+            (package / "METADATA").write_text("Name: example\nVersion: 1.2\n")
+            (venv / "lib64").symlink_to(venv / "lib", target_is_directory=True)
+            result = agent.python_packages([str(venv)])
+            matches = [p for p in result["items"] if p["location"] == str(package.parent.resolve())]
+            self.assertEqual(matches, [{"name": "example", "version": "1.2", "location": str(package.parent.resolve())}])
+
     def test_installed_and_held_packages_keep_epoch_source_and_arch(self):
         # db:Status-Status remains installed even when dpkg's selection is hold.
         output = ("installed\tlibssl3:amd64\t3:3.0.11-1~deb12u2\tamd64\topenssl\t3:3.0.11-1~deb12u2\n"
